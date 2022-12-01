@@ -4,46 +4,15 @@
 using namespace cv;
 using namespace std;
 
-// From wikipedia:
-//
-// def RL_deconvolution(observed, psf, iterations):
-//     # initial estimate is arbitrary - uniform 50% grey works fine
-//     latent_est = 0.5*np.ones(observed.shape)
-//     # create an inverse psf
-//     psf_hat = psf[::-1,::-1]
-//     # iterate towards ML estimate for the latent image
-//     for i in np.arange(iterations):
-//         est_conv      = cv2.filter2D(latent_est,-1,psf)
-//         relative_blur = observed/est_conv;
-//         error_est     = cv2.filter2D(relative_blur,-1,psf_hat)
-//         latent_est    = latent_est * error_est
-//     return latent_est
-
-static int image_type;
-
-Mat RL_deconvolution(Mat observed, Mat psf, int iterations) {
-
-	Scalar grey;
-
+//Richardson-Lucy deconvolution
+Mat rl_deconvol(Mat observed, Mat psf, int iterations)
+{
 	// Uniform grey starting estimation
-	switch (image_type) {
-		case CV_64FC1:
-			grey = Scalar(0.5);
-		case CV_64FC3:
-			grey = Scalar(0.5, 0.5, 0.5);
-	}
-	Mat latent_est = Mat(observed.size(), image_type, grey);
+	Mat latent_est = Mat(observed.size(), observed.type());
+	observed.copyTo(latent_est);
 
-	// Flip the point spread function (NOT the inverse)
-	Mat psf_hat = Mat(psf.size(), CV_64FC1);
-	int psf_row_max = psf.rows - 1;
-	int psf_col_max = psf.cols - 1;
-	for (int row = 0; row <= psf_row_max; row++) {
-		for (int col = 0; col <= psf_col_max; col++) {
-			psf_hat.at<double>(psf_row_max - row, psf_col_max - col) =
-				psf.at<double>(row, col);
-		}
-	}
+	Mat psf_hat;
+	flip(psf, psf_hat, -1);
 
 	Mat est_conv;
 	Mat relative_blur;
@@ -51,14 +20,10 @@ Mat RL_deconvolution(Mat observed, Mat psf, int iterations) {
 
 	// Iterate
 	for (int i=0; i<iterations; i++) {
-
 		filter2D(latent_est, est_conv, -1, psf);
-
 		// Element-wise division
 		relative_blur = observed.mul(1.0/est_conv);
-
 		filter2D(relative_blur, error_est, -1, psf_hat);
-
 		// Element-wise multiplication
 		latent_est = latent_est.mul(error_est);
 	}
@@ -66,101 +31,77 @@ Mat RL_deconvolution(Mat observed, Mat psf, int iterations) {
 	return latent_est;
 }
 
+// Calculate a gaussian blur psf.
+Mat genPSF(int sz) {
+	Mat psf = Mat(Size(sz, sz), CV_32FC1, 0.0f);
+	
+	float sigma_row = sz/8;
+	float sigma_col = sz/8;
+	float mean_row = sz/2.0;
+	float mean_col = sz/2.0;
+		
+	Scalar sum0;
+	for (int j = 0; j<psf.rows; j++) {
+		for (int k = 0; k<psf.cols; k++) {
+			float temp = exp(
+					-(pow((j - mean_row) / sigma_row, 2.0) + 
+					  pow((k - mean_col) / sigma_col, 2.0))
+					  ) / (2* M_PI * sigma_row * sigma_col);			
+			psf.at<float>(j,k) = temp;
+		}
+	}
+
+	sum0 = sum(psf);
+	psf = psf / sum0;
+	
+	// float dmin, dmax;
+	// Point minLoc, maxLoc;
+	// minMaxLoc(psf, &dmin, &dmax, &minLoc, &maxLoc);
+	// float alpha = 255 / (dmax - dmin), beta = - alpha * dmin; 
+	// Mat psf_view;
+	// convertScaleAbs(psf, psf_view, alpha, beta);
+	// //imshow("Float", psf_view); waitKey(0); 
+
+	return psf;
+}
+
 int main( int argc, const char** argv )
 {
-
 	if (argc != 3) {
 		cout << "Usage: " << argv[0] << " image iterations" << "\n";
 		return -1;
 	}
-
 	int iterations = atoi(argv[2]);
+	Mat original_image = imread(argv[1], 0);
+	Size imsz = original_image.size();
 
-	// Read the original image
-	Mat original_image;
-	original_image = imread(argv[1], CV_LOAD_IMAGE_UNCHANGED);
-
-	int num_channels = original_image.channels();
-	switch (num_channels) {
-		case 1:
-			image_type = CV_64FC1;
-			break;
-		case 3:
-			image_type = CV_64FC3;
-			break;
-		default:
-			return -2;
-	}
-
-	// This is a hack, assumes too much
-	int divisor;
-	switch (original_image.elemSize() / num_channels) {
-		case 1:
-			divisor = 255;
-			break;
-		case 2:
-			divisor = 65535;
-			break;
-		default:
-			return -3;
-	}
-
-	// From here on, use 64-bit floats
-	// Convert original_image to float
-	Mat float_image;
-	original_image.convertTo(float_image, image_type);
-	float_image *= 1.0/divisor;
-	namedWindow("Float", CV_WINDOW_AUTOSIZE);
-	imshow("Float", float_image);
-
-	// Calculate a gaussian blur psf.
-	double sigma_row = 9.0;
-	double sigma_col = 5.0;
-	int psf_size = 5;
-	double mean_row = 0.0;
-	double mean_col = psf_size/2.0;
-	double sum = 0.0;
-	double temp;
-	Mat psf = Mat(Size(psf_size, psf_size), CV_64FC1, 0.0);
-
-	for (int j = 0; j<psf.rows; j++) {
-		for (int k = 0; k<psf.cols; k++) {
-			temp = exp(
-					-0.5 * (
-						pow((j - mean_row) / sigma_row, 2.0) + 
-						pow((k - mean_col) / sigma_col, 2.0))) /
-				(2* M_PI * sigma_row * sigma_col);
-			sum += temp;
-			psf.at<double>(j,k) = temp;
-		}
-	}
-
-	// Normalise the psf.
-	for (int row = 0; row<psf.rows; row++) {
-		// cout << row << " ";
-		for (int col = 0; col<psf.cols; col++) {
-			psf.at<double>(row, col) /= sum;
-			// cout << psf.at<double>(row, col) << " ";
-		}
-		// cout << "\n";
-	}
+	// From here on, use 64-bit floats	// Convert original_image to float
+	int type_f = CV_32FC1;
+	Mat org_flt;
+	original_image.convertTo(org_flt, type_f, 1.f/255);
+	
+	Mat psf = genPSF(35);
 
 	// Blur the float_image with the psf.
-	Mat blurred_float;
-	blurred_float = float_image.clone();
-	filter2D(float_image, blurred_float, -1, psf);
-	namedWindow("BlurredFloat", CV_WINDOW_AUTOSIZE);
-	imshow("BlurredFloat", blurred_float);
+	Mat blurred_flt = org_flt.clone();
+	filter2D(org_flt, blurred_flt, -1, psf);
 
-	Mat estimation = RL_deconvolution(blurred_float, psf, iterations);
-	namedWindow("Estimation", CV_WINDOW_AUTOSIZE);
-	imshow("Estimation", estimation);
+	Mat estimation = rl_deconvol(blurred_flt, psf, iterations);
 
-	waitKey(0); //wait infinite time for a keypress
+	Mat est_view = Mat(imsz.height, imsz.width*3, type_f);
+	Rect rc_lft = Rect(0, 				0, imsz.width, imsz.height);
+	Rect rc_mid = Rect(imsz.width,		0, imsz.width, imsz.height);
+	Rect rc_rht = Rect(imsz.width*2,	0, imsz.width, imsz.height);
 
-	destroyWindow("Float");
-	destroyWindow("BlurredFloat");
-	destroyWindow("Estimation");
+	org_flt.copyTo(Mat(est_view, rc_lft));
+	blurred_flt.copyTo(Mat(est_view, rc_mid));
+	estimation.copyTo(Mat(est_view, rc_rht));
+
+	namedWindow("Estimation", 0);	
+	imshow("Estimation", est_view);
+	waitKey(10); //cause update 
+	setWindowProperty("Estimation", WND_PROP_FULLSCREEN, 1); 
+	waitKey(0); 
 
 	return 0;
 }
