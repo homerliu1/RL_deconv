@@ -75,7 +75,7 @@ int main( int argc, const char** argv )
 	Mat original_image = imread(argv[1], 0);
 	Size imsz = original_image.size();
 
-	// From here on, use 64-bit floats	// Convert original_image to float
+	// From here on, use floats	// Convert original_image to float
 	int type_f = CV_32FC1;
 	Mat org_flt;
 	original_image.convertTo(org_flt, type_f, 1.f/255);
